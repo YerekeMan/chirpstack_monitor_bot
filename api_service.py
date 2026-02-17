@@ -5,6 +5,8 @@ import logging
 import websocket
 import json
 from config import URL, HEADERS
+import random
+
 _cached_jwt = None
 frames_cache = {}
 MAX_CACHE_SIZE = 200
@@ -123,3 +125,21 @@ def fetch_devices(app_id, offset=0, limit=10):
 
 def fetch_device_detail(dev_eui):
     return fetch_item(f"devices/{dev_eui}")
+
+
+def send_device_command(dev_eui, b64_data):
+    """Отправляет Base64 команду в очередь устройства ChirpStack"""
+    url = f"{URL}/api/devices/{dev_eui}/queue"
+    payload = {
+        "deviceQueueItem": {
+            "devEUI": dev_eui,
+            "fPort": random.randint(1, 8),
+            "data": b64_data
+        }
+    }
+    try:
+        r = requests.post(url, json=payload, headers=get_auth_headers(), timeout=5)
+        return r.status_code == 200
+    except Exception as e:
+        logging.error(f"Send Command Error: {e}")
+        return False

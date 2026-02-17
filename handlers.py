@@ -1,12 +1,15 @@
 import logging, json
 from aiogram import F, types
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import api_service
 from config import dp
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 
 last_messages = {}
-
+class CommandStates(StatesGroup):
+    waiting_for_data = State()
 
 # --- Утилиты ---
 
@@ -61,6 +64,49 @@ async def start(m: types.Message):
     sent = await m.answer(f"Привет, {m.from_user.first_name}!\nВыбери организацию:", reply_markup=get_orgs_kb())
     last_messages[m.from_user.id] = sent.message_id
 
+
+@dp.message(CommandStates.waiting_for_data)
+async def process_command_send(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    eui = data.get("current_eui")
+    app_id = data.get("app_id")
+    org_id = data.get("org_id")
+    menu_msg_id = data.get("menu_msg_id")
+    b64_text = m.text.strip()
+    logging.info(f"CMD_SEND: User {m.from_user.full_name} to {eui} data: {b64_text}")
+    success = api_service.send_device_command(eui, b64_text)
+    try:
+        await m.delete()
+    except:
+        pass
+    if success:
+        logging.info(f"CMD_SUCCESS: Command sent to {eui}")
+        status_text = f"✅ Команда <code>{b64_text}</code> отправлена!"
+    else:
+        logging.error(f"CMD_ERROR: Failed to send to {eui}")
+        status_text = "❌ Ошибка при отправке команды!"
+    res = api_service.fetch_device_detail(eui)
+    if res:
+        text = (f"{status_text}\n\n"  # Добавляем статус сверху
+                f"📟 <b>Устройство:</b> {res.get('device', {}).get('name')}\n"
+                f"<b>EUI:</b> <code>{eui}</code>\n<b>Seen:</b> {res.get('lastSeenAt', 'Никогда')}")
+        kb = InlineKeyboardBuilder()
+        kb.button(text="📡 RAW Frames", callback_data=f"frames_devices_{eui}_{app_id}_{org_id}")
+        kb.button(text="🔔 Events", callback_data=f"events_{eui}_{app_id}_{org_id}")
+        kb.button(text="✉️ Отправить команду", callback_data=f"cmd_{eui}_{app_id}_{org_id}")
+        kb.button(text="⬅️ Назад", callback_data=f"devlist_0_{app_id}_{org_id}")
+        try:
+            await m.bot.edit_message_text(
+                chat_id=m.chat.id,
+                message_id=menu_msg_id,
+                text=text,
+                reply_markup=kb.adjust(2, 1, 1).as_markup(),
+                parse_mode="HTML"
+            )
+        except:
+            await m.answer(text, reply_markup=kb.adjust(2, 1, 1).as_markup(), parse_mode="HTML")
+
+    await state.clear()
 
 @dp.message(F.text)
 async def handle_search(m: types.Message):
@@ -168,10 +214,15 @@ async def device_detail(c: types.CallbackQuery):
     text = (f"📟 <b>Устройство:</b> {res.get('device', {}).get('name')}\n"
             f"<b>EUI:</b> <code>{eui}</code>\n<b>Seen:</b> {res.get('lastSeenAt', 'Никогда')}")
     kb = InlineKeyboardBuilder()
+    # Ряд 1: две кнопки (Фреймы и Ивенты)
     kb.button(text="📡 RAW Frames", callback_data=f"frames_devices_{eui}_{app_id}_{org_id}")
-    kb.button(text="🔔 Device Events", callback_data=f"events_{eui}_{app_id}_{org_id}")
+    kb.button(text="🔔 Events", callback_data=f"events_{eui}_{app_id}_{org_id}")
+    # Ряд 2: одна кнопка (Команда)
+    kb.button(text="✉️ Отправить команду", callback_data=f"cmd_{eui}_{app_id}_{org_id}")
+    # Ряд 3: одна кнопка (Назад)
     kb.button(text="⬅️ Назад", callback_data=f"devlist_0_{app_id}_{org_id}")
-    await safe_edit(c, text, kb.adjust(2, 1).as_markup())
+    # Схема 2, 1, 1
+    await safe_edit(c, text, kb.adjust(2, 1, 1).as_markup())
 
 
 @dp.callback_query(F.data.startswith("gwinfo_"))
@@ -191,7 +242,7 @@ async def gw_detail(c: types.CallbackQuery):
 async def show_frames_list(c: types.CallbackQuery):
     parts = c.data.split("_")
     kind, item_id = parts[1], parts[2]
-    frames = api_service.frames_cache.get(f"fr_{item_id}") or api_service.fetch_frames(kind, item_id)
+    frames = api_service.fetch_frames(kind, item_id)
     app_id, org_id = (parts[3], parts[4]) if kind == "devices" else ("0", parts[3])
     if not frames:
         return await c.answer("Буфер пуст", show_alert=True)
@@ -253,7 +304,7 @@ async def view_single_frame(c: types.CallbackQuery):
 async def show_events_list(c: types.CallbackQuery):
     parts = c.data.split("_")
     eui, app_id, org_id = parts[1], parts[2], parts[3]
-    events = api_service.frames_cache.get(f"ev_{eui}") or api_service.fetch_events(eui)
+    events = api_service.fetch_events(eui)
     if not events:
         return await c.answer("Событий нет", show_alert=True)
     kb = InlineKeyboardBuilder()
@@ -272,7 +323,30 @@ async def show_events_list(c: types.CallbackQuery):
         time_str = api_service.format_ts(raw_time)
         kb.button(text=f"{icon} {e_type} | {time_str}", callback_data=f"evview_{eui}_{i}_{app_id}_{org_id}")
     kb.adjust(1).row(
-        types.InlineKeyboardButton(text="🔄 Обновить", callback_data=f"events_{eui}_{app_id}_{org_id}"),
+        types.InlineKeyboardButton(text="🔄 Обновить", callback_data=c.data),
         types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"devinfo_{eui}_{app_id}_{org_id}")
     )
     await safe_edit(c, f"🔔 <b>События:</b> <code>{eui}</code>", kb.as_markup())
+
+
+@dp.callback_query(F.data.startswith("cmd_"))
+async def ask_command_data(c: types.CallbackQuery, state: FSMContext):
+    # Данные теперь приходят как cmd_{eui}_{app_id}_{org_id}
+    parts = c.data.split("_")
+    eui, app_id, org_id = parts[1], parts[2], parts[3]
+    await state.update_data(
+        current_eui=eui,
+        app_id=app_id,
+        org_id=org_id,
+        menu_msg_id=c.message.message_id  # Запоминаем ID сообщения меню
+    )
+    await state.set_state(CommandStates.waiting_for_data)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="❌ Отмена", callback_data=f"devinfo_{eui}_{app_id}_{org_id}")
+    await safe_edit(c,
+                    f"🚀 <b>Отправка команды на</b> <code>{eui}</code>\n\n"
+                    f"Введите команду в формате <b>Base64</b>:",
+                    kb.as_markup()
+                    )
+    await c.answer()
+
