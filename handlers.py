@@ -6,12 +6,25 @@ import api_service
 from config import dp
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-
+from datetime import datetime, timedelta
 last_messages = {}
 class CommandStates(StatesGroup):
     waiting_for_data = State()
 
 # --- Утилиты ---
+
+def format_seen_time(iso_str):
+    if not iso_str:
+        return "Никогда"
+    try:
+
+        clean_ts = iso_str.split('.')[0].replace('Z', '').replace('T', ' ')
+        dt = datetime.strptime(clean_ts, '%Y-%m-%d %H:%M:%S')
+        local_dt = dt + timedelta(hours=5)
+        return local_dt.strftime('%d.%m.%Y %H:%M:%S')
+    except Exception as e:
+        logging.error(f"Time format error: {e}")
+        return iso_str  # Возвращаем как есть, если не удалось распарсить
 
 async def safe_edit(c: types.CallbackQuery, text: str, kb=None, parse_mode="HTML"):
     """Универсальная функция обновления сообщения с защитой от ошибок и логированием"""
@@ -211,17 +224,15 @@ async def device_detail(c: types.CallbackQuery):
     _, eui, app_id, org_id = c.data.split("_")
     res = api_service.fetch_device_detail(eui)
     if not res: return
+    seen = format_seen_time(res.get('lastSeenAt'))
     text = (f"📟 <b>Устройство:</b> {res.get('device', {}).get('name')}\n"
-            f"<b>EUI:</b> <code>{eui}</code>\n<b>Seen:</b> {res.get('lastSeenAt', 'Никогда')}")
+            f"<b>EUI:</b> <code>{eui}</code>\n"
+            f"<b>Seen (UTC+5):</b> <code>{seen}</code>")
     kb = InlineKeyboardBuilder()
-    # Ряд 1: две кнопки (Фреймы и Ивенты)
     kb.button(text="📡 RAW Frames", callback_data=f"frames_devices_{eui}_{app_id}_{org_id}")
     kb.button(text="🔔 Events", callback_data=f"events_{eui}_{app_id}_{org_id}")
-    # Ряд 2: одна кнопка (Команда)
     kb.button(text="✉️ Отправить команду", callback_data=f"cmd_{eui}_{app_id}_{org_id}")
-    # Ряд 3: одна кнопка (Назад)
     kb.button(text="⬅️ Назад", callback_data=f"devlist_0_{app_id}_{org_id}")
-    # Схема 2, 1, 1
     await safe_edit(c, text, kb.adjust(2, 1, 1).as_markup())
 
 
@@ -230,8 +241,10 @@ async def gw_detail(c: types.CallbackQuery):
     _, gw_id, org_id = c.data.split("_")
     data = api_service.fetch_item(f"gateways/{gw_id}")
     if not data: return
+    seen = format_seen_time(data.get('lastSeenAt'))
     text = (f"📡 <b>Шлюз:</b> {data.get('gateway', {}).get('name')}\n"
-            f"<b>MAC:</b> <code>{gw_id}</code>\n<b>Seen:</b> {data.get('lastSeenAt')}")
+            f"<b>MAC:</b> <code>{gw_id}</code>\n"
+            f"<b>Seen (UTC+5):</b> <code>{seen}</code>")
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Frames", callback_data=f"frames_gateways_{gw_id}_{org_id}")
     kb.button(text="⬅️ Назад", callback_data=f"gwp_0_{org_id}")
